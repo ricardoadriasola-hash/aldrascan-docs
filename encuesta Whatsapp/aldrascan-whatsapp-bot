@@ -1,0 +1,204 @@
+const axios = require('axios');
+
+const userStates = {};
+
+const CATALOG = {
+  clinica: {
+    economico: { scanner: "Medit i700", formacion: "progresiva, 3 sesiones" },
+    estandar: { scanner: "Medit i900 Classic", formacion: "progresiva, 4 sesiones" },
+    premium: { scanner: "Medit i900 Touch", formacion: "completa, 5 sesiones" }
+  },
+  movil: {
+    scanner: "Medit i900 Mobility",
+    formacion: "avanzada, orientada clínica móvil"
+  },
+  digital: {
+    economico: { scanner: "Shining 3D ELF", formacion: "básica, 2 sesiones" },
+    premium: { scanner: "Shining 3D Elite", formacion: "avanzada, 4 sesiones" }
+  }
+};
+
+async function sendWhatsAppMessage(to, body) {
+  const { WA_PHONE_NUMBER_ID, WA_ACCESS_TOKEN } = process.env;
+  const url = `https://graph.facebook.com/v21.0/${WA_PHONE_NUMBER_ID}/messages`;
+  
+  await axios.post(url, {
+    messaging_product: "whatsapp",
+    to,
+    ...body
+  }, {
+    headers: { 'Authorization': `Bearer ${WA_ACCESS_TOKEN}` }
+  });
+}
+
+async function sendInteractiveButtons(to, text, buttons) {
+  await sendWhatsAppMessage(to, {
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text },
+      action: {
+        buttons: buttons.map(b => ({
+          type: "reply",
+          reply: { id: b.id, title: b.title }
+        }))
+      }
+    }
+  });
+}
+
+async function sendInteractiveList(to, text, buttonText, sections) {
+  await sendWhatsAppMessage(to, {
+    type: "interactive",
+    interactive: {
+      type: "list",
+      body: { text },
+      action: {
+        button: buttonText,
+        sections
+      }
+    }
+  });
+}
+
+async function handleUserMessage(waId, message) {
+  let state = userStates[waId] || { step: 'Q1', human_mode: false };
+
+  if (state.human_mode) return;
+
+  const msgType = message.type;
+  let userInput;
+
+  if (msgType === 'interactive') {
+    const reply = message.interactive;
+    userInput = reply.button_reply?.id || reply.list_reply?.id;
+  } else if (msgType === 'text') {
+    userInput = message.text.body;
+  }
+
+  if (['CTA_PROPUESTA', 'CTA_DEMO', 'CTA_ASESOR'].includes(userInput)) {
+    state.human_mode = true;
+    userStates[waId] = state;
+    await sendWhatsAppMessage(waId, {
+      type: "text",
+      text: { body: "🤝 Perfecto, te conectaré con un asesor humano en breve. Gracias por tu interés." }
+    });
+    return;
+  }
+
+  if (state.step === 'Q1') {
+    await sendInteractiveButtons(waId, 
+      "¡Hola! 👋 Soy el asistente de AldraScan.\n\n¿En qué entorno trabajas principalmente?",
+      [
+        { id: "ENV_CLINICA", title: "Clínica fija" },
+        { id: "ENV_MOVIL", title: "Móvil/domicilio" },
+        { id: "ENV_DIGITAL", title: "Lab digital" }
+      ]
+    );
+    state.step = 'Q2';
+    
+  } else if (state.step === 'Q2' && userInput?.startsWith('ENV_')) {
+    state.entorno = userInput.replace('ENV_', '').toLowerCase();
+    
+    if (state.entorno === 'movil') {
+      state.prioridad = 'movil';
+      state.step = 'Q3';
+    } else {
+      state.step = 'Q2B';
+    }
+    
+    if (state.step === 'Q2B') {
+      await sendInteractiveList(waId,
+        "¿Cuál es tu prioridad principal?",
+        "Ver opciones",
+        [{
+          title: "Selecciona una opción",
+          rows: [
+            { id: "PRIO_ECONOMICO", title: "Precio", description: "Solución más económica" },
+            { id: "PRIO_ESTANDAR", title: "Balance", description: "Calidad-precio equilibrado" },
+            { id: "PRIO_PREMIUM", title: "Premium", description: "Máxima tecnología" }
+          ]
+        }]
+      );
+    } else {
+      await sendInteractiveButtons(waId,
+        "¿Qué dispositivo usas para trabajar?",
+        [
+          { id: "DEVICE_APPLE", title: "Apple (Mac/iPad)" },
+          { id: "DEVICE_HP", title: "HP/Windows" }
+        ]
+      );
+    }
+    
+  } else if (state.step === 'Q2B' && userInput?.startsWith('PRIO_')) {
+    state.prioridad = userInput.replace('PRIO_', '').toLowerCase();
+    state.step = 'Q3';
+    
+    await sendInteractiveButtons(waId,
+      "¿Qué dispositivo usas para trabajar?",
+      [
+        { id: "DEVICE_APPLE", title: "Apple (Mac/iPad)" },
+        { id: "DEVICE_HP", title: "HP/Windows" }
+      ]
+    );
+    
+  } else if (state.step === 'Q3' && userInput?.startsWith('DEVICE_')) {
+    state.device = userInput.replace('DEVICE_', '').toLowerCase();
+    state.step = 'DONE';
+    
+    let pack;
+    if (state.entorno === 'movil') {
+      pack = CATALOG.movil;
+    } else {
+      pack = CATALOG[state.entorno][state.prioridad];
+    }
+    
+    const deviceBrand = state.device === 'apple' ? 'Apple (Mac Studio/iPad Pro)' : 'HP ZBook';
+    const software = state.device === 'apple' ? 'Panda Smart (macOS/iOS)' : 'Panda Smart (Windows)';
+    
+    const recommendation = `✅ *Tu Pack Recomendado:*\n\n📷 Escáner: ${pack.scanner}\n💻 Equipo: ${deviceBrand}\n🖥️ Software: ${software}\n🎓 Formación: ${pack.formacion}\n\n¿Qué te gustaría hacer ahora?`;
+    
+    await sendInteractiveButtons(waId, recommendation, [
+      { id: "CTA_PROPUESTA", title: "Propuesta detallada" },
+      { id: "CTA_DEMO", title: "Agendar demo" },
+      { id: "CTA_ASESOR", title: "Hablar con asesor" }
+    ]);
+  }
+  
+  userStates[waId] = state;
+}
+
+exports.handler = async (event) => {
+  const { WA_VERIFY_TOKEN } = process.env;
+  
+  if (event.httpMethod === 'GET') {
+    const mode = event.queryStringParameters['hub.mode'];
+    const token = event.queryStringParameters['hub.verify_token'];
+    const challenge = event.queryStringParameters['hub.challenge'];
+    
+    if (mode === 'subscribe' && token === WA_VERIFY_TOKEN) {
+      console.log('Webhook verificado');
+      return { statusCode: 200, body: challenge };
+    }
+    return { statusCode: 403, body: 'Forbidden' };
+  }
+  
+  if (event.httpMethod === 'POST') {
+    const body = JSON.parse(event.body);
+    
+    if (body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
+      const message = body.entry[0].changes[0].value.messages[0];
+      const waId = message.from;
+      
+      try {
+        await handleUserMessage(waId, message);
+      } catch (error) {
+        console.error('Error procesando mensaje:', error);
+      }
+    }
+    
+    return { statusCode: 200, body: 'OK' };
+  }
+  
+  return { statusCode: 405, body: 'Method Not Allowed' };
+};
